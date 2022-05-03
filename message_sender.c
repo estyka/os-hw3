@@ -12,7 +12,7 @@
 
 int main(int argc, char *argv[]) {
     if (argc != 4) {
-        printf("number of args=%d, incorrect number of arguments", argc); // change to fprintf
+	    fprintf(stderr, "ERROR: number of args=%d, incorrect number of arguments, errno: %s\n", argc, strerror(EINVAL));
         exit(FAIL);
     }
     char* msgslot_file_path = argv[1];

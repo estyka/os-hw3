@@ -17,7 +17,7 @@ int main(int argc, char *argv[]) {
     
 
     if (argc != 3) {
-        printf("number of args=%d, incorrect number of arguments", argc); // change to fprintf
+        fprintf(stderr, "ERROR: number of args=%d, incorrect number of arguments, errno: %s\n", argc, strerror(EINVAL));
         exit(FAIL);
     }
     msgslot_file_path = argv[1];
@@ -35,6 +35,7 @@ int main(int argc, char *argv[]) {
     }
 
     num_read = read(fd, user_buffer, MAX_BUF_LEN);
+    printf("num of bytes read=%d\n", num_read);
     if (num_read < 0) {
         fprintf(stderr, "ERROR: failed to read message, errorno: %s\n", strerror(errno));
         close(fd);

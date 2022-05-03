@@ -1,14 +1,3 @@
-/* Assumptions:
-    - minor numbers are in the range of 0 to 255
-*/
-
-// errno - https://stackoverflow.com/questions/24567584/how-to-set-errno-in-linux-device-driver
-// The c library interprets this and gives a -1 return code and sets errno to the positive error
-// f_inode - https://elixir.bootlin.com/linux/latest/source/include/linux/fs.h#L956
-
-// TODO: decide if to change file->private_data to something else (the node) or add .release to FOPS.
-// TODO: make sure when getting a variable that could be NULL - wont return null-pointer-error when referring to it.
-
 //Defining __KERNEL__ and MODULE allows us to access kernel-level
 // code not usually available to userspace programs.
 #undef __KERNEL__
@@ -31,12 +20,7 @@
 
 MODULE_LICENSE("GPL");
 
-/*
-devices_arr - array of lenth 256 - of type channel_node* (array of pointers channel_node). array[x] == points to the first channel created for minor x (or to null if none was created yet)
-channel_node -  (struct with fields next, channel_id, msg, msg_len?)
-*/
-
-// TODO: does it need to be * or **? Depends if I want it to be a POINTER to channel_node or a channel_node itself.
+// devices_arr: array of lenth 256 of type channel_node*. devices_arr[x] == first channel node created for minor x (or to null if none was created yet)
 static struct channel_node* devices_arr[MAX_DEVICES]; // array of channel_nodes (devices_arr[x] is initialized == NULL if no channel was created yet in minor x)
 int minor_num;
 unsigned long channel_id;
@@ -65,13 +49,7 @@ channel_node* create_channel_node(int minor_num, unsigned long channel_id){
     return _channel_node;
 }
 
-/* if channel_node exists - returns it
-    else:
-    if is read:
-        return NULL
-    if is write:
-        create new node to last node in list
-*/
+// if channel_node exists - returns it. Else: if in reading mode - returns None, else created new node
 channel_node* get_channel_node(int minor_num, unsigned long channel_id, int is_read){
     channel_node* curr_channel_node = devices_arr[minor_num];
     channel_node* prev_channel_node;
@@ -80,10 +58,6 @@ channel_node* get_channel_node(int minor_num, unsigned long channel_id, int is_r
         printk("There are no nodes of minor number %d.\n", minor_num);
         printk("Creating first node with channel id %ld\n", channel_id);
         devices_arr[minor_num] = create_channel_node(minor_num, channel_id);
-
-        if (devices_arr[minor_num] == NULL){ // allocation failed
-            return NULL; // TODO: change to error of type allocation failure
-        }
         return devices_arr[minor_num];
     }
 
@@ -91,12 +65,13 @@ channel_node* get_channel_node(int minor_num, unsigned long channel_id, int is_r
         if (curr_channel_node->channel_id == channel_id) {
             return curr_channel_node;
         }
-        prev_channel_node = curr_channel_node; // TODO: not sure this will work (might be pointing at same object) - maybe have to do some deep copy?
+        prev_channel_node = curr_channel_node;
         curr_channel_node = curr_channel_node->next; // Advance node on linked_list
     }
     printk("There is no node of minor number %d with channel %ld.\n", minor_num, channel_id);
-
+    
     if (is_read){
+    	printk("Read mode: returning NULL bc there is no channel_node of the specified channel\n");
         return NULL;
     }
 
@@ -115,9 +90,9 @@ static int device_open( struct inode* inode,
     // Initialize file metadata (for now only minor_num)
     file->private_data = (file_meta*)kmalloc(sizeof(file_meta), GFP_KERNEL); // Initialize private_data field
     if (file->private_data == NULL){ // allocation failed
-        return -1; // TODO: change to error of type allocation failure
+        return -ENOMEM;
     }
-    ((file_meta*)file->private_data)->minor_num = iminor(inode); // TODO: maybe its enough: file->private_data->minor_num ?
+    ((file_meta*)file->private_data)->minor_num = iminor(inode);
 
     return SUCCESS;
 }
@@ -139,7 +114,7 @@ static long device_ioctl( struct   file* file,
     if (ioctl_command_id==MSG_SLOT_CHANNEL && ioctl_param != 0) {
         printk("Invoking ioctl: setting channel_id to %ld\n", ioctl_param);
         if (file->private_data == NULL) { // device_open hasn't been called
-            return -EINVAL; // TODO: make sure this is the correct error to return
+            return -EINVAL;
         }
         // Initialize channel_id
         ((file_meta*)file->private_data)->channel_id = ioctl_param;
@@ -173,20 +148,18 @@ static ssize_t device_read( struct file* file,
     _channel_node = get_channel_node(minor_num, channel_id, 1);
 
     if (_channel_node == NULL) { // no message set to channel_id
+    	printk("There is no node with specified channel - returning NULL\n");
         return -EWOULDBLOCK;
     }
 
     if (length < _channel_node->msg_len) {
+    	printk("Error: length of buffer is shorter than channel msg len\n");
         return -ENOSPC;
     }
 
-    // read message from message slot file to user's buffer
-    //if (copy_to_user(buffer, _channel_node->msg, _channel_node->msg_len) < 0){
-    	//return -1; // TODO: change to relevant error type (use strerror)
-    //}
     for (i=0; i<_channel_node->msg_len; i++){
         if (put_user(_channel_node->msg[i], &buffer[i]) < 0 ){
-        	//return -1; // TODO: change to relevant error type (use strerror) and make sure put_user should return non negative value
+        	return -EFAULT;
         }
     }
 	
@@ -194,15 +167,14 @@ static ssize_t device_read( struct file* file,
 }
 
 //---------------------------------------------------------------
-// a processs which has already opened
-// the device file attempts to write to it
+// a processs which has already opened the device file attempts to write to it
 static ssize_t device_write( struct file*       file,
                              const char __user* buffer,
                              size_t             length, // length of message
                              loff_t*            offset)
 {
 	channel_node* _channel_node;
-    char temp_msg[MAX_BUF_LEN]; // to not write into real node until making sure the user msg is legal
+    char temp_msg[MAX_BUF_LEN];
     
     printk("Invoking device_write: (%p,%ld)\n", file, length);
     if (file->private_data == NULL || ((file_meta*)file->private_data)->channel_id == 0) { // device_open or device_ioctl hasn't been called
@@ -212,21 +184,20 @@ static ssize_t device_write( struct file*       file,
     minor_num = ((file_meta*)file->private_data)->minor_num;
     channel_id = ((file_meta*)file->private_data)->channel_id;
 
-    _channel_node = get_channel_node(minor_num, channel_id, 0);
-    if (_channel_node == NULL) { // function get_channel_node failed
-    	return -1; // TODO: change to relevant error type (use strerror)
-    }
-
-    if (length > MAX_BUF_LEN || length == 0){
+	if (length > MAX_BUF_LEN || length == 0){
         return -EMSGSIZE;
     }
 
+	// gets or creates channel_node according to specified minor and channel
+    _channel_node = get_channel_node(minor_num, channel_id, 0);
+    if (_channel_node == NULL) { // allocation failed
+    	return -ENOMEM;
+    }
+
     // first write to temp_message to make sure there are no errors (in user space buffer)
-    // TODO: Don’t include the terminating null character of the C string as part of the message:
-    //  does this mean i have to set length = length-1 ?
     for (i=0; i<length; i++){
         if (get_user(temp_msg[i], &buffer[i]) != 0) { // error
-            return -1; // TODO: change to relevant error type (use strerror)
+            return -EFAULT;
         }
     }
 
@@ -234,7 +205,7 @@ static ssize_t device_write( struct file*       file,
     for (i=0; i<length; i++){
         _channel_node->msg[i] = temp_msg[i];
     }
-    _channel_node->msg_len = i; // i or length? anyways: i==length should always be true at this point (unless i should check it?)
+    _channel_node->msg_len = i; // i==length should always be true
 	
     return i;
 }
